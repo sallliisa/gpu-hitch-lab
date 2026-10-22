@@ -16,23 +16,43 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Check out official NVIDIA NVAPI SDK
+        uses: actions/checkout@v4
+        with:
+          repository: NVIDIA/nvapi
+          ref: 70d337db9186e968eab622f7e786de7e437faf3d
+          path: third_party/nvapi
+          persist-credentials: false
+
       - name: Configure (MSVC + Windows SDK)
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DGPU_HITCH_BUILD_REFLEX=ON
 
       - name: Compile
         run: cmake --build build --config Release --parallel
 
-      - name: Prepare portable files
+      - name: Prepare separate portable versions
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path package -Force | Out-Null
-          Copy-Item build/Release/GpuHitchLab.exe package/GpuHitchLab.exe
-          Copy-Item README.md package/README.md
+          New-Item -ItemType Directory -Path package-baseline -Force | Out-Null
+          New-Item -ItemType Directory -Path package-reflex -Force | Out-Null
+          Copy-Item build/Release/GpuHitchLab.exe package-baseline/GpuHitchLab.exe
+          Copy-Item build/Release/GpuHitchLabReflex.exe package-reflex/GpuHitchLabReflex.exe
+          Copy-Item README.md package-baseline/README.md
+          Copy-Item README.md package-reflex/README.md
+          Copy-Item third_party/nvapi/License.txt package-reflex/LICENSE-NVAPI.txt
 
-      - name: Upload executable
+      - name: Upload baseline executable
         uses: actions/upload-artifact@v4
         with:
-          name: GpuHitchLab-Windows-x64
-          path: package/
+          name: GpuHitchLab-Baseline-Windows-x64
+          path: package-baseline/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload NVIDIA Reflex executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: GpuHitchLab-Reflex-Windows-x64
+          path: package-reflex/
           if-no-files-found: error
           retention-days: 14

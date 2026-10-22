@@ -1,6 +1,7 @@
 build/
 out/
 logs/
+third_party/
 *.obj
 *.pdb
 *.ilk

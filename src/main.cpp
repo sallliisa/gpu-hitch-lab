@@ -4,6 +4,9 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
+#ifdef GPU_HITCH_LAB_REFLEX
+#include <nvapi.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -23,6 +26,36 @@ namespace {
 
 constexpr UINT kBufferCount = 3;
 constexpr wchar_t kWindowClass[] = L"GpuHitchLabWindow";
+
+#ifdef GPU_HITCH_LAB_REFLEX
+enum class ReflexMode { Off, On, Boost };
+
+const char* ReflexName(ReflexMode mode) {
+    switch (mode) {
+        case ReflexMode::Off: return "off";
+        case ReflexMode::On: return "on";
+        case ReflexMode::Boost: return "on+boost";
+    }
+    return "unknown";
+}
+
+const wchar_t* ReflexTitle(ReflexMode mode) {
+    switch (mode) {
+        case ReflexMode::Off: return L"OFF";
+        case ReflexMode::On: return L"ON";
+        case ReflexMode::Boost: return L"ON+BOOST";
+    }
+    return L"UNKNOWN";
+}
+
+void CheckNv(NvAPI_Status status, const char* operation) {
+    if (status != NVAPI_OK) {
+        NvAPI_ShortString description{};
+        NvAPI_GetErrorMessage(status, description);
+        throw std::runtime_error(std::string(operation) + " failed: " + description);
+    }
+}
+#endif
 
 void Check(HRESULT hr, const char* operation) {
     if (FAILED(hr)) {
@@ -80,6 +113,9 @@ struct Options {
     int height = 720;
     double hitchMs = 30.0;
     double hours = 0.0;
+#ifdef GPU_HITCH_LAB_REFLEX
+    ReflexMode reflex = ReflexMode::On;
+#endif
 };
 
 Options ParseOptions() {
@@ -124,6 +160,14 @@ Options ParseOptions() {
                 result.height = std::stoi(value);
                 if (result.height < 240 || result.height > 16384)
                     throw std::runtime_error("--height is out of range");
+#ifdef GPU_HITCH_LAB_REFLEX
+            } else if (arg == L"--reflex") {
+                if (value == L"off") result.reflex = ReflexMode::Off;
+                else if (value == L"on") result.reflex = ReflexMode::On;
+                else if (value == L"boost" || value == L"on+boost")
+                    result.reflex = ReflexMode::Boost;
+                else throw std::runtime_error("--reflex must be off, on, or boost");
+#endif
             } else {
                 throw std::runtime_error("Unknown option: " + Utf8(arg.c_str()));
             }
@@ -152,6 +196,10 @@ struct FrameSample {
     int fps = 0;
     UINT width = 0;
     UINT height = 0;
+#ifdef GPU_HITCH_LAB_REFLEX
+    ReflexMode reflexMode = ReflexMode::Off;
+    double reflexSleepMs = 0.0;
+#endif
     bool hitch = false;
 };
 
@@ -171,7 +219,11 @@ public:
         csv_ << "utc,frame_id,reason,frame_interval_ms,previous_present_ms,"
                 "previous_cpu_work_ms,previous_fence_wait_ms,present_ms,"
                 "fence_wait_ms,record_submit_ms,cpu_work_ms,gpu_command_ms,"
-                "vsync,fps_limit,width,height\n";
+                "vsync,fps_limit,width,height";
+#ifdef GPU_HITCH_LAB_REFLEX
+        csv_ << ",reflex_mode,reflex_sleep_ms";
+#endif
+        csv_ << '\n';
         csv_ << std::fixed << std::setprecision(3);
         session_ << "GPU Hitch Lab - minimal DirectX 12\n"
                  << "Started UTC: " << UtcStamp(false) << "\n";
@@ -186,8 +238,21 @@ public:
                  << "Frame interval hitch threshold (ms): " << options.hitchMs << "\n"
                  << "Note: GPU timestamp covers only the app's rendering commands, not "
                     "display time or all GPU work.\n";
+#ifdef GPU_HITCH_LAB_REFLEX
+        session_ << "NVIDIA Reflex edition: official NVAPI driver functions\n"
+                 << "Initial Reflex mode: " << ReflexName(options.reflex) << "\n"
+                 << "NvAPI minimumIntervalUs: 0 (the same CPU FPS limiter as baseline)\n"
+                 << "NvAPI sleep called once per rendered frame, including Reflex Off.\n";
+#endif
         session_.flush();
     }
+
+#ifdef GPU_HITCH_LAB_REFLEX
+    void Note(const std::string& message) {
+        session_ << UtcStamp(false) << " " << message << '\n';
+        session_.flush();
+    }
+#endif
 
     void Hitch(const FrameSample& sample, double gpuMs) {
         csv_ << sample.utc << ',' << sample.frameId << ',' << sample.reason << ','
@@ -196,7 +261,11 @@ public:
              << sample.presentMs << ',' << sample.fenceWaitMs << ','
              << sample.recordSubmitMs << ',' << sample.cpuWorkMs << ','
              << gpuMs << ',' << (sample.vsync ? "on" : "off") << ','
-             << sample.fps << ',' << sample.width << ',' << sample.height << '\n';
+             << sample.fps << ',' << sample.width << ',' << sample.height;
+#ifdef GPU_HITCH_LAB_REFLEX
+        csv_ << ',' << ReflexName(sample.reflexMode) << ',' << sample.reflexSleepMs;
+#endif
+        csv_ << '\n';
         csv_.flush();
     }
 
@@ -226,6 +295,9 @@ public:
         if (fence_) {
             try { Drain(); } catch (...) {}
         }
+#ifdef GPU_HITCH_LAB_REFLEX
+        if (nvapiInitialized_) NvAPI_Unload();
+#endif
         if (readback_ && mapped_) readback_->Unmap(0, nullptr);
         if (fenceEvent_) CloseHandle(fenceEvent_);
         if (timerResolutionSet_) timeEndPeriod(1);
@@ -235,7 +307,13 @@ public:
         if (timeBeginPeriod(1) == TIMERR_NOERROR) timerResolutionSet_ = true;
         CreateAppWindow();
         CreateGraphics();
+#ifdef GPU_HITCH_LAB_REFLEX
+        InitializeReflex();
+#endif
         logger_.Configuration(adapterName_, tearingSupported_, options_);
+#ifdef GPU_HITCH_LAB_REFLEX
+        LogDriverReflexStatus();
+#endif
         startedMs_ = NowMs();
         ignoreUntilMs_ = startedMs_ + 1500.0; // Ignore shader/driver/window warmup.
         UpdateTitle();
@@ -258,6 +336,15 @@ public:
                 Sleep(50);
                 continue;
             }
+#ifdef GPU_HITCH_LAB_REFLEX
+            if (reflexModeChangePending_) {
+                reflexModeChangePending_ = false;
+                ApplyReflexMode();
+                LogDriverReflexStatus();
+                ignoreUntilMs_ = NowMs() + 750.0;
+                UpdateTitle();
+            }
+#endif
             if (resizeWidth_ && resizeHeight_) Resize(resizeWidth_, resizeHeight_);
             RenderFrame();
             if (NowMs() - lastTitleMs_ >= 1000.0) UpdateTitle();
@@ -311,6 +398,17 @@ private:
                         app->UpdateTitle();
                         return 0;
                     }
+#ifdef GPU_HITCH_LAB_REFLEX
+                    if (wparam == 'R' && !(lparam & (1L << 30))) {
+                        switch (app->options_.reflex) {
+                            case ReflexMode::Off: app->options_.reflex = ReflexMode::On; break;
+                            case ReflexMode::On: app->options_.reflex = ReflexMode::Boost; break;
+                            case ReflexMode::Boost: app->options_.reflex = ReflexMode::Off; break;
+                        }
+                        app->reflexModeChangePending_ = true;
+                        return 0;
+                    }
+#endif
                     if (wparam == VK_F11 && !(lparam & (1L << 30))) {
                         app->ToggleBorderless();
                         return 0;
@@ -378,6 +476,56 @@ private:
         previousFrameStartMs_ = -1.0;
         ignoreUntilMs_ = NowMs() + 1250.0;
     }
+
+#ifdef GPU_HITCH_LAB_REFLEX
+    void InitializeReflex() {
+        CheckNv(NvAPI_Initialize(), "NvAPI_Initialize");
+        nvapiInitialized_ = true;
+        ApplyReflexMode();
+    }
+
+    void ApplyReflexMode() {
+        NV_SET_SLEEP_MODE_PARAMS mode{};
+        mode.version = NV_SET_SLEEP_MODE_PARAMS_VER;
+        mode.bLowLatencyMode = options_.reflex != ReflexMode::Off ? 1 : 0;
+        mode.bLowLatencyBoost = options_.reflex == ReflexMode::Boost ? 1 : 0;
+        mode.minimumIntervalUs = 0; // Retain the same CPU FPS limiter as baseline.
+        mode.bUseMarkersToOptimize = 1;
+        CheckNv(NvAPI_D3D_SetSleepMode(device_.Get(), &mode), "NvAPI_D3D_SetSleepMode");
+    }
+
+    void LogDriverReflexStatus() {
+        NV_GET_SLEEP_STATUS_PARAMS status{};
+        status.version = NV_GET_SLEEP_STATUS_PARAMS_VER;
+        const NvAPI_Status result = NvAPI_D3D_GetSleepStatus(device_.Get(), &status);
+        if (result == NVAPI_OK) {
+            logger_.Note(std::string("Reflex requested: ") + ReflexName(options_.reflex) +
+                         "; driver low-latency state: " +
+                         (status.bLowLatencyMode ? "on" : "off") +
+                         "; driver full-screen VRR: " + (status.bFsVrr ? "yes" : "no"));
+        } else {
+            NvAPI_ShortString description{};
+            NvAPI_GetErrorMessage(result, description);
+            logger_.Note(std::string("Reflex requested: ") + ReflexName(options_.reflex) +
+                         "; driver sleep-status query unavailable: " + description);
+        }
+    }
+
+    void MarkReflex(NV_LATENCY_MARKER_TYPE type, uint64_t frameId) {
+        NV_LATENCY_MARKER_PARAMS marker{};
+        marker.version = NV_LATENCY_MARKER_PARAMS_VER;
+        marker.frameID = frameId;
+        marker.markerType = type;
+        CheckNv(NvAPI_D3D_SetLatencyMarker(device_.Get(), &marker),
+                "NvAPI_D3D_SetLatencyMarker");
+    }
+
+    double SleepReflex() {
+        const double before = NowMs();
+        CheckNv(NvAPI_D3D_Sleep(device_.Get()), "NvAPI_D3D_Sleep");
+        return NowMs() - before;
+    }
+#endif
 
     void CreateGraphics() {
         Check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory_)), "CreateDXGIFactory2");
@@ -557,11 +705,25 @@ private:
     }
 
     void RenderFrame() {
+#ifdef GPU_HITCH_LAB_REFLEX
+        const double reflexSleepMs = SleepReflex();
+#endif
         const double start = NowMs();
         const double interval = previousFrameStartMs_ >= 0.0
             ? start - previousFrameStartMs_ : 0.0;
         previousFrameStartMs_ = start;
 
+#ifdef GPU_HITCH_LAB_REFLEX
+        const uint64_t reflexFrameId = frameId_ + 1;
+        MarkReflex(SIMULATION_START, reflexFrameId);
+#endif
+        const float hue = static_cast<float>((frameId_ % 600) / 600.0);
+        const float color[] = {0.08f + 0.16f * hue, 0.11f,
+                               0.25f - 0.12f * hue, 1.0f};
+#ifdef GPU_HITCH_LAB_REFLEX
+        MarkReflex(SIMULATION_END, reflexFrameId);
+        MarkReflex(RENDERSUBMIT_START, reflexFrameId);
+#endif
         const UINT index = swapChain_->GetCurrentBackBufferIndex();
         Slot& slot = slots_[index];
         const double beforeWait = NowMs();
@@ -578,9 +740,6 @@ private:
         D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
         rtv.ptr += static_cast<SIZE_T>(index) * rtvIncrement_;
 
-        const float hue = static_cast<float>((frameId_ % 600) / 600.0);
-        const float color[] = {0.08f + 0.16f * hue, 0.11f,
-                               0.25f - 0.12f * hue, 1.0f};
         commandList_->ClearRenderTargetView(rtv, color, 0, nullptr);
         D3D12_RESOURCE_BARRIER toPresent = Transition(
             slot.target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
@@ -596,11 +755,18 @@ private:
         Check(queue_->Signal(fence_.Get(), value), "Signal GPU fence");
         slot.fenceValue = value;
 
+#ifdef GPU_HITCH_LAB_REFLEX
+        MarkReflex(RENDERSUBMIT_END, reflexFrameId);
+        MarkReflex(PRESENT_START, reflexFrameId);
+#endif
         const double beforePresent = NowMs();
         const UINT presentFlags = (!options_.vsync && tearingSupported_)
             ? DXGI_PRESENT_ALLOW_TEARING : 0;
         Check(swapChain_->Present(options_.vsync ? 1 : 0, presentFlags), "DXGI Present");
         const double afterPresent = NowMs();
+#ifdef GPU_HITCH_LAB_REFLEX
+        MarkReflex(PRESENT_END, reflexFrameId);
+#endif
 
         FrameSample sample{};
         sample.utc = UtcStamp(false);
@@ -617,6 +783,10 @@ private:
         sample.fps = options_.fps;
         sample.width = width_;
         sample.height = height_;
+#ifdef GPU_HITCH_LAB_REFLEX
+        sample.reflexMode = options_.reflex;
+        sample.reflexSleepMs = reflexSleepMs;
+#endif
 
         if (interval > 0.0 && start >= ignoreUntilMs_) {
             if (interval > options_.hitchMs) sample.reason += "interval|";
@@ -644,10 +814,18 @@ private:
         title << L"GPU Hitch Lab | " << frameId_ << L" frames, "
               << hitchCount_ << L" hitches | V-Sync "
               << (options_.vsync ? L"ON" : L"OFF") << L" | FPS "
-              << (options_.fps ? std::to_wstring(options_.fps) : L"uncapped")
+              << (options_.fps ? std::to_wstring(options_.fps) : L"uncapped");
+#ifdef GPU_HITCH_LAB_REFLEX
+        title << L" | Reflex " << ReflexTitle(options_.reflex);
+#endif
+        title
               << L" | interval " << std::fixed << std::setprecision(1)
               << lastIntervalMs_ << L" ms | Present " << lastPresentMs_
-              << L" ms | V/F11/Esc";
+              << L" ms | V/F11/"
+#ifdef GPU_HITCH_LAB_REFLEX
+              << L"R/"
+#endif
+              << L"Esc";
         SetWindowTextW(hwnd_, title.str().c_str());
         lastTitleMs_ = NowMs();
     }
@@ -693,6 +871,10 @@ private:
     double lastCpuWorkMs_ = 0.0;
     double lastFenceWaitMs_ = 0.0;
     double lastIntervalMs_ = 0.0;
+#ifdef GPU_HITCH_LAB_REFLEX
+    bool nvapiInitialized_ = false;
+    bool reflexModeChangePending_ = false;
+#endif
 };
 
 } // namespace
@@ -709,6 +891,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 L"--borderless     (monitor-sized borderless window)\n"
                 L"--hours N        (exit after N hours)\n"
                 L"--width N --height N\n\n"
+#ifdef GPU_HITCH_LAB_REFLEX
+                L"--reflex off|on|boost  (default: on)\n\n"
+                L"R = cycle Reflex Off/On/On+Boost.\n"
+#endif
                 L"V = toggle V-Sync; F11 = toggle borderless; Esc = exit.\n"
                 L"Hitches are logged in a logs folder beside the executable.",
                 L"GPU Hitch Lab - Help", MB_OK | MB_ICONINFORMATION);
