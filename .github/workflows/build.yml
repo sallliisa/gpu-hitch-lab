@@ -1,0 +1,38 @@
+name: Build Windows x64
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Configure (MSVC + Windows SDK)
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Compile
+        run: cmake --build build --config Release --parallel
+
+      - name: Prepare portable files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path package -Force | Out-Null
+          Copy-Item build/Release/GpuHitchLab.exe package/GpuHitchLab.exe
+          Copy-Item README.md package/README.md
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: GpuHitchLab-Windows-x64
+          path: package/
+          if-no-files-found: error
+          retention-days: 14
