@@ -16,6 +16,21 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Validate PowerShell diagnostic launcher syntax
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'Launch-Diagnostics.ps1').Path,
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host $_.Message }
+            throw "Launch-Diagnostics.ps1 has parser errors"
+          }
+
       - name: Check out official NVIDIA NVAPI SDK
         uses: actions/checkout@v4
         with:
