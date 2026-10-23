@@ -59,8 +59,13 @@ jobs:
               if ($size -lt 4096) { throw "WPR exported an unexpectedly small ETL" }
               Write-Host "Verified CPU ETW start, status, compressed stop ($size bytes)."
             } finally {
-              & $wpr -cancel -instancename $instance *> $null
+              # On success -stop already ends the session. -cancel would return
+              # exit code 1 and incorrectly fail an otherwise successful CI job.
+              if ($LASTEXITCODE -ne 0) {
+                & $wpr -cancel -instancename $instance *> $null
+              }
             }
+            $global:LASTEXITCODE = 0
           }
 
       - name: Package CLI
