@@ -1,11 +1,12 @@
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
 #include <windows.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <iterator>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -283,6 +284,8 @@ public:
         CommandResult r = RunWpr(wpr_, cmd, dir_ / "wpr-start.txt");
         if ((!r.launched || r.exitCode != 0) && cfg_.gpu) {
             log_.Note("GPU.light or combined profile start failed; trying CPU-only. See wpr-start.txt.");
+            // WPR can partially initialize a session before returning failure.
+            RunWpr(wpr_, L"-cancel -instancename " + session_, dir_ / "wpr-start-recovery.txt", 30000);
             r = RunWpr(wpr_, L"-start " + custom + L" -instancename " + session_,
                        dir_ / "wpr-start-cpu-only.txt");
             cfg_.gpu = false;
@@ -315,13 +318,13 @@ public:
         const auto command = L"-stop " + Quote(trace.wstring()) +
             L" -compress -skipPdbGen -instancename " + session_;
         const CommandResult r = RunWpr(wpr_, command, dir_ / (base + "-export.txt"), 240000);
-        active_ = false;
         if (!r.launched || r.exitCode != 0 || !fs::exists(trace)) {
             log_.Note("Trace export failed; see " + base + "-export.txt.");
-            // A failed stop may leave this specific session running.
+            // A failed stop can leave a WPR kernel session running.
             Cancel();
             return false;
         }
+        active_ = false;
         const std::uint64_t bytes = FileBytes(trace);
         log_.Note(base + ".etl saved: " + std::to_string(bytes / 1024) + " KiB");
         if (bytes > static_cast<std::uint64_t>(cfg_.maxFileMb) * 1024 * 1024)
@@ -417,6 +420,7 @@ int wmain(int argc, wchar_t** argv) {
                     log.Note("Total ETL budget reached. Stopping to preserve disk space.");
                     break;
                 }
+                if (stopRequested.load()) break;
                 log.Note("Resuming ETW after export. Frames during export may be disturbed.");
                 rec.Start();
             }
