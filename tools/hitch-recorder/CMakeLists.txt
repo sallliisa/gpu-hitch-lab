@@ -1,0 +1,11 @@
+cmake_minimum_required(VERSION 3.21)
+project(HitchRecorder LANGUAGES CXX)
+
+add_executable(HitchRecorder main.cpp)
+target_compile_features(HitchRecorder PRIVATE cxx_std_17)
+target_compile_definitions(HitchRecorder PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+if (MSVC)
+    target_compile_options(HitchRecorder PRIVATE /W4 /permissive- /utf-8)
+    target_link_options(HitchRecorder PRIVATE /INCREMENTAL:NO)
+endif()
+target_link_libraries(HitchRecorder PRIVATE advapi32 user32)
