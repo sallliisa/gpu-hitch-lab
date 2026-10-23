@@ -39,6 +39,30 @@ jobs:
           & $wpr -profiles tools/hitch-recorder/HitchCPU.wprp
           if ($LASTEXITCODE -ne 0) { throw "WPR rejected the HitchCPU profile" }
 
+      - name: Exercise real WPR CPU ETW session when permitted
+        shell: pwsh
+        run: |
+          $wpr = Join-Path $env:windir "System32/wpr.exe"
+          $profilePath = (Resolve-Path tools/hitch-recorder/HitchCPU.wprp).Path
+          $profileSpec = "$profilePath!HitchCPU.Light"
+          $instance = "HitchRecorderCI"
+          & $wpr -start $profileSpec -instancename $instance
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "GitHub-hosted runner cannot start kernel ETW; live capture needs local admin testing."
+          } else {
+            try {
+              Start-Sleep -Seconds 2
+              & $wpr -status -instancename $instance
+              & $wpr -stop (Join-Path (Get-Location) "build-hitch/HitchCI.etl") -compress -skipPdbGen -instancename $instance
+              if ($LASTEXITCODE -ne 0) { throw "WPR start succeeded but export failed" }
+              $size = (Get-Item "build-hitch/HitchCI.etl").Length
+              if ($size -lt 4096) { throw "WPR exported an unexpectedly small ETL" }
+              Write-Host "Verified CPU ETW start, status, compressed stop ($size bytes)."
+            } finally {
+              & $wpr -cancel -instancename $instance *> $null
+            }
+          }
+
       - name: Package CLI
         shell: pwsh
         run: |
