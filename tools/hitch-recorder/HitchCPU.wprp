@@ -24,7 +24,7 @@
       <Stacks>
         <Stack Value="CSwitch"/>
         <Stack Value="ReadyThread"/>
-        <Stack Value="Profile"/>
+        <Stack Value="SampledProfile"/>
         <Stack Value="PagefaultHard"/>
       </Stacks>
     </SystemProvider>
