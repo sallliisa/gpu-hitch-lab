@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <WindowsPerformanceRecorder Version="1.0" Author="GPU Hitch Lab">
   <Profiles>
-    <!-- The app rewrites just the Buffers value to match --buffer-mb. -->
+    <!-- The app rewrites the Buffers value to match the selected memory budget. -->
     <!-- BufferSize 1024 KiB x Buffers 256 = 256 MiB for the CPU/kernel collector. -->
     <SystemCollector Id="HitchKernelCollector" Name="HitchRecorderKernelSession">
       <BufferSize Value="1024"/>
