@@ -259,6 +259,13 @@ public:
         frames_ << std::fixed << std::setprecision(3);
         session_ << "GPU Hitch Lab - minimal DirectX 12\n"
                  << "Started UTC: " << UtcStamp(false) << "\n";
+        // Ensure zero-hitch sessions have a visible CSV header immediately.
+        // A forced termination should not leave newly created logs empty.
+        csv_.flush();
+        frames_.flush();
+        session_.flush();
+        if (!csv_ || !frames_ || !session_)
+            throw std::runtime_error("Could not flush log headers to disk");
     }
 
     void Configuration(const std::string& adapter, bool tearing, const Options& options) {
@@ -385,12 +392,18 @@ public:
         MSG message{};
         while (true) {
             while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
-                if (message.message == WM_QUIT) return static_cast<int>(message.wParam);
+                if (message.message == WM_QUIT) {
+                    logger_.Note("Normal window exit. Frames=" + std::to_string(frameId_) +
+                                 ", detected_hitches=" + std::to_string(hitchCount_));
+                    return static_cast<int>(message.wParam);
+                }
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
             if (options_.durationSeconds > 0.0 &&
                 NowMs() - startedMs_ >= options_.durationSeconds * 1000.0) {
+                logger_.Note("Timed session completed. Frames=" + std::to_string(frameId_) +
+                             ", detected_hitches=" + std::to_string(hitchCount_));
                 return 0;
             }
             if (!active_ || sizing_ || IsIconic(hwnd_)) {
