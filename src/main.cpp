@@ -206,6 +206,12 @@ struct FrameSample {
     double fenceWaitMs = 0.0;
     double recordSubmitMs = 0.0;
     double cpuWorkMs = 0.0;
+    double frameStartQpcMs = 0.0;
+    double previousPaceMs = 0.0;
+    double previousPaceOverrunMs = 0.0;
+    double commandRecordMs = 0.0;
+    double queueSubmitMs = 0.0;
+    uint64_t cpuThreadCycles = 0; // raw thread cycles, not CPU Busy milliseconds
     bool vsync = false;
     int fps = 0;
     UINT width = 0;
@@ -227,18 +233,25 @@ public:
         std::filesystem::create_directories(folder);
         const auto runId = UtcStamp(true);
         csv_.open(folder / ("hitches-" + runId + ".csv"), std::ios::out | std::ios::trunc);
+        frames_.open(folder / ("frames-" + runId + ".csv"), std::ios::out | std::ios::trunc);
         session_.open(folder / ("session-" + runId + ".txt"), std::ios::out | std::ios::trunc);
-        if (!csv_ || !session_)
+        if (!csv_ || !frames_ || !session_)
             throw std::runtime_error("Cannot create logs beside the executable");
-        csv_ << "utc,frame_id,reason,frame_interval_ms,previous_present_ms,"
-                "previous_cpu_work_ms,previous_fence_wait_ms,present_ms,"
-                "fence_wait_ms,record_submit_ms,cpu_work_ms,gpu_command_ms,"
-                "vsync,fps_limit,width,height";
+        const char* header = "utc,frame_id,reason,frame_interval_ms,previous_present_ms,"
+            "previous_cpu_work_ms,previous_fence_wait_ms,present_ms,"
+            "fence_wait_ms,record_submit_ms,cpu_work_ms,gpu_command_ms,"
+            "vsync,fps_limit,width,height,frame_start_qpc_ms,previous_pace_ms,"
+            "previous_pace_overrun_ms,command_record_ms,queue_submit_ms,cpu_thread_cycles";
+        csv_ << header;
+        frames_ << header;
 #ifdef GPU_HITCH_LAB_REFLEX
         csv_ << ",reflex_mode,reflex_sleep_ms";
+        frames_ << ",reflex_mode,reflex_sleep_ms";
 #endif
         csv_ << '\n';
+        frames_ << '\n';
         csv_ << std::fixed << std::setprecision(3);
+        frames_ << std::fixed << std::setprecision(3);
         session_ << "GPU Hitch Lab - minimal DirectX 12\n"
                  << "Started UTC: " << UtcStamp(false) << "\n";
     }
@@ -250,6 +263,9 @@ public:
                  << "FPS limit: " << options.fps << "\n"
                  << "Borderless initial: " << (options.borderless ? "yes" : "no") << "\n"
                  << "Frame interval hitch threshold (ms): " << options.hitchMs << "\n"
+                 << "Requested duration in seconds (zero=indefinite): " << options.durationSeconds << "\n"
+                 << "Every completed frame logged to frames CSV; only hits to hitches CSV.\n"
+                 << "cpu_thread_cycles is a cycle count, not CPU time in milliseconds.\n"
                  << "Note: GPU timestamp covers only the app's rendering commands, not "
                     "display time or all GPU work.\n";
 #ifdef GPU_HITCH_LAB_REFLEX
@@ -268,24 +284,50 @@ public:
     }
 #endif
 
+    void Frame(const FrameSample& sample, double gpuMs) {
+        if (framesFull_) return;
+        WriteRow(frames_, sample, gpuMs);
+        if (++framesWritten_ % 240 == 0) {
+            frames_.flush();
+            // A conservative safety ceiling to prevent multi-day tests filling a disk.
+            const auto current = frames_.tellp();
+            if (current >= 0 && static_cast<uint64_t>(current) >= 2ULL * 1024 * 1024 * 1024) {
+                framesFull_ = true;
+                session_ << UtcStamp(false) << " Frame CSV reached 2 GiB; continuing hitch-only logging.\n";
+                session_.flush();
+            }
+        }
+    }
+
     void Hitch(const FrameSample& sample, double gpuMs) {
-        csv_ << sample.utc << ',' << sample.frameId << ',' << sample.reason << ','
-             << sample.intervalMs << ',' << sample.previousPresentMs << ','
-             << sample.previousCpuWorkMs << ',' << sample.previousFenceWaitMs << ','
-             << sample.presentMs << ',' << sample.fenceWaitMs << ','
-             << sample.recordSubmitMs << ',' << sample.cpuWorkMs << ','
-             << gpuMs << ',' << (sample.vsync ? "on" : "off") << ','
-             << sample.fps << ',' << sample.width << ',' << sample.height;
-#ifdef GPU_HITCH_LAB_REFLEX
-        csv_ << ',' << ReflexName(sample.reflexMode) << ',' << sample.reflexSleepMs;
-#endif
-        csv_ << '\n';
+        WriteRow(csv_, sample, gpuMs);
         csv_.flush();
+        frames_.flush();
     }
 
 private:
+    static void WriteRow(std::ofstream& stream, const FrameSample& sample, double gpuMs) {
+        stream << sample.utc << ',' << sample.frameId << ',' << sample.reason << ','
+               << sample.intervalMs << ',' << sample.previousPresentMs << ','
+               << sample.previousCpuWorkMs << ',' << sample.previousFenceWaitMs << ','
+               << sample.presentMs << ',' << sample.fenceWaitMs << ','
+               << sample.recordSubmitMs << ',' << sample.cpuWorkMs << ','
+               << gpuMs << ',' << (sample.vsync ? "on" : "off") << ','
+               << sample.fps << ',' << sample.width << ',' << sample.height << ','
+               << sample.frameStartQpcMs << ',' << sample.previousPaceMs << ','
+               << sample.previousPaceOverrunMs << ',' << sample.commandRecordMs << ','
+               << sample.queueSubmitMs << ',' << sample.cpuThreadCycles;
+#ifdef GPU_HITCH_LAB_REFLEX
+        stream << ',' << ReflexName(sample.reflexMode) << ',' << sample.reflexSleepMs;
+#endif
+        stream << '\n';
+    }
+
     std::ofstream csv_;
+    std::ofstream frames_;
     std::ofstream session_;
+    uint64_t framesWritten_ = 0;
+    bool framesFull_ = false;
 };
 
 D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* resource,
@@ -678,6 +720,7 @@ private:
             ? 1000.0 * static_cast<double>(end - begin) /
                   static_cast<double>(timestampFrequency_)
             : 0.0;
+        logger_.Frame(slot.sample, gpuMs);
         if (slot.sample.hitch) logger_.Hitch(slot.sample, gpuMs);
         slot.pending = false;
     }
@@ -705,8 +748,13 @@ private:
         ignoreUntilMs_ = NowMs() + 1000.0;
     }
 
-    void Pace(double frameStart) const {
-        if (options_.fps == 0) return;
+    void Pace(double frameStart) {
+        const double paceBegin = NowMs();
+        if (options_.fps == 0) {
+            previousPaceMs_ = 0.0;
+            previousPaceOverrunMs_ = 0.0;
+            return;
+        }
         const double target = frameStart + 1000.0 / static_cast<double>(options_.fps);
         for (;;) {
             const double remaining = target - NowMs();
@@ -716,6 +764,8 @@ private:
             else
                 YieldProcessor();
         }
+        previousPaceMs_ = NowMs() - paceBegin;
+        previousPaceOverrunMs_ = std::max(0.0, NowMs() - target);
     }
 
     void RenderFrame() {
@@ -723,6 +773,8 @@ private:
         const double reflexSleepMs = SleepReflex();
 #endif
         const double start = NowMs();
+        ULONG64 startCycles = 0;
+        const bool cyclesKnown = QueryThreadCycleTime(GetCurrentThread(), &startCycles) != 0;
         const double interval = previousFrameStartMs_ >= 0.0
             ? start - previousFrameStartMs_ : 0.0;
         previousFrameStartMs_ = start;
@@ -745,6 +797,7 @@ private:
         const double afterWait = NowMs();
         Retire(index);
 
+        const double recordBegin = NowMs();
         Check(slot.allocator->Reset(), "Reset command allocator");
         Check(commandList_->Reset(slot.allocator.Get(), nullptr), "Reset command list");
         commandList_->EndQuery(queryHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2 * index);
@@ -763,11 +816,13 @@ private:
                                        2 * index, 2, readback_.Get(),
                                        sizeof(uint64_t) * 2 * index);
         Check(commandList_->Close(), "Close command list");
+        const double recordEnd = NowMs();
         ID3D12CommandList* lists[] = {commandList_.Get()};
         queue_->ExecuteCommandLists(1, lists);
         const uint64_t value = ++nextFenceValue_;
         Check(queue_->Signal(fence_.Get(), value), "Signal GPU fence");
         slot.fenceValue = value;
+        const double submitEnd = NowMs();
 
 #ifdef GPU_HITCH_LAB_REFLEX
         MarkReflex(RENDERSUBMIT_END, reflexFrameId);
@@ -778,6 +833,8 @@ private:
             ? DXGI_PRESENT_ALLOW_TEARING : 0;
         Check(swapChain_->Present(options_.vsync ? 1 : 0, presentFlags), "DXGI Present");
         const double afterPresent = NowMs();
+        ULONG64 endCycles = 0;
+        const bool cyclesEnded = QueryThreadCycleTime(GetCurrentThread(), &endCycles) != 0;
 #ifdef GPU_HITCH_LAB_REFLEX
         MarkReflex(PRESENT_END, reflexFrameId);
 #endif
@@ -793,6 +850,13 @@ private:
         sample.fenceWaitMs = afterWait - beforeWait;
         sample.recordSubmitMs = beforePresent - afterWait;
         sample.cpuWorkMs = afterPresent - beforeWait;
+        sample.frameStartQpcMs = start;
+        sample.previousPaceMs = previousPaceMs_;
+        sample.previousPaceOverrunMs = previousPaceOverrunMs_;
+        sample.commandRecordMs = recordEnd - recordBegin;
+        sample.queueSubmitMs = submitEnd - recordEnd;
+        sample.cpuThreadCycles = (cyclesKnown && cyclesEnded && endCycles >= startCycles)
+            ? endCycles - startCycles : 0;
         sample.vsync = options_.vsync;
         sample.fps = options_.fps;
         sample.width = width_;
@@ -885,6 +949,8 @@ private:
     double lastCpuWorkMs_ = 0.0;
     double lastFenceWaitMs_ = 0.0;
     double lastIntervalMs_ = 0.0;
+    double previousPaceMs_ = 0.0;
+    double previousPaceOverrunMs_ = 0.0;
 #ifdef GPU_HITCH_LAB_REFLEX
     bool nvapiInitialized_ = false;
     bool reflexModeChangePending_ = false;
