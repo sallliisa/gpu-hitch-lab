@@ -30,6 +30,16 @@ jobs:
       - name: Compile
         run: cmake --build build --config Release --parallel
 
+      - name: Download pinned official PresentMon 2.6.0 console
+        shell: pwsh
+        run: |
+          $uri = "https://github.com/GameTechDev/PresentMon/releases/download/v2.6.0/PresentMon-2.6.0-x64.exe"
+          Invoke-WebRequest -Uri $uri -OutFile PresentMon-2.6.0-x64.exe
+          $expected = "b2a706bc6ad475749e3b7e3409263aa1e6906d45bdcf993f6dbc0f660188f1af"
+          $actual = (Get-FileHash PresentMon-2.6.0-x64.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "PresentMon official SHA-256 mismatch" }
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/GameTechDev/PresentMon/v2.6.0/LICENSE.txt" -OutFile LICENSE-PRESENTMON.txt
+
       - name: Prepare separate portable versions
         shell: pwsh
         run: |
@@ -37,8 +47,13 @@ jobs:
           New-Item -ItemType Directory -Path package-reflex -Force | Out-Null
           Copy-Item build/Release/GpuHitchLab.exe package-baseline/GpuHitchLab.exe
           Copy-Item build/Release/GpuHitchLabReflex.exe package-reflex/GpuHitchLabReflex.exe
-          Copy-Item README.md package-baseline/README.md
-          Copy-Item README.md package-reflex/README.md
+          foreach ($dir in @('package-baseline', 'package-reflex')) {
+            Copy-Item README.md "$dir/README.md"
+            Copy-Item Launch-Diagnostics.ps1 "$dir/Launch-Diagnostics.ps1"
+            Copy-Item Run-Diagnostics.cmd "$dir/Run-Diagnostics.cmd"
+            Copy-Item PresentMon-2.6.0-x64.exe "$dir/PresentMon-2.6.0-x64.exe"
+            Copy-Item LICENSE-PRESENTMON.txt "$dir/LICENSE-PRESENTMON.txt"
+          }
           Copy-Item third_party/nvapi/License.txt package-reflex/LICENSE-NVAPI.txt
 
       - name: Upload baseline executable
