@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-net session >nul 2>&1
+fltmc >nul 2>&1
 if errorlevel 1 (
     echo Administrator access is required to collect kernel ETW events.
     powershell.exe -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
