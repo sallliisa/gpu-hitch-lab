@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WindowsPerformanceRecorder Version="1.0" Author="GPU Hitch Lab">
+  <Profiles>
+    <!-- The app rewrites just the Buffers value to match --buffer-mb. -->
+    <!-- BufferSize 1024 KiB x Buffers 256 = 256 MiB for the CPU/kernel collector. -->
+    <SystemCollector Id="HitchKernelCollector" Name="HitchRecorderKernelSession">
+      <BufferSize Value="1024"/>
+      <Buffers Value="256"/>
+    </SystemCollector>
+    <SystemProvider Id="HitchKernelProvider">
+      <Keywords>
+        <Keyword Value="ProcessThread"/>
+        <Keyword Value="Loader"/>
+        <Keyword Value="CPUConfig"/>
+        <Keyword Value="CSwitch"/>
+        <Keyword Value="ReadyThread"/>
+        <Keyword Value="ThreadPriority"/>
+        <Keyword Value="SampledProfile"/>
+        <Keyword Value="DPC"/>
+        <Keyword Value="Interrupt"/>
+        <Keyword Value="DiskIO"/>
+        <Keyword Value="HardFaults"/>
+      </Keywords>
+      <Stacks>
+        <Stack Value="CSwitch"/>
+        <Stack Value="ReadyThread"/>
+        <Stack Value="Profile"/>
+        <Stack Value="PagefaultHard"/>
+      </Stacks>
+    </SystemProvider>
+    <Profile Id="HitchCPU.Light.Memory" Name="HitchCPU" Description="Hitch Recorder: CPU scheduling and memory/disk activity" DetailLevel="Light" LoggingMode="Memory">
+      <Collectors>
+        <SystemCollectorId Value="HitchKernelCollector">
+          <SystemProviderId Value="HitchKernelProvider"/>
+        </SystemCollectorId>
+      </Collectors>
+    </Profile>
+  </Profiles>
+</WindowsPerformanceRecorder>
