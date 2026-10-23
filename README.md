@@ -1,84 +1,74 @@
-# GPU Hitch Lab (two DirectX 12 editions)
+# GPU Hitch Lab — Baseline and NVIDIA Reflex diagnostics
 
-Portable Windows diagnostic renderer for investigating intermittent frame pacing and DXGI presentation stalls. There are now **two separately downloadable executables**:
+Portable Windows 11 x64 / DirectX 12 test software for intermittent presentation and synchronization stalls. Source builds entirely on **GitHub Actions**; no local compiler, Visual Studio, or SDK installation is needed.
 
-- **Baseline — `GpuHitchLab.exe`:** the original minimal test with no NVIDIA SDK calls.
-- **NVIDIA Reflex — `GpuHitchLabReflex.exe`:** the same renderer plus real NVIDIA NVAPI Reflex sleep-mode calls and latency markers, with **Off**, **On**, and **On + Boost** modes. This is an early integration, not yet runtime-validated on the target RTX 4070 Super.
+## Download
 
-Both are diagnostics, not complete captures of the Windows presentation pipeline.
+Open [Windows Builds](https://github.com/sallliisa/gpu-hitch-lab/actions/workflows/build.yml), open the latest **successful** run on `main`, and download **both** independently built ZIP artifacts:
 
-## Download (no compiler needed)
+- `GpuHitchLab-Baseline-Windows-x64` — DX12 without NVIDIA Reflex.
+- `GpuHitchLab-Reflex-Windows-x64` — same renderer plus the **real NVAPI Reflex SDK** calls, Off / On / On+Boost (default On).
 
-1. Open [Actions > Build Windows x64](https://github.com/sallliisa/gpu-hitch-lab/actions/workflows/build.yml).
-2. Open the latest successful run on `main`.
-3. Under **Artifacts**, choose one or both:
-   - `GpuHitchLab-Baseline-Windows-x64`
-   - `GpuHitchLab-Reflex-Windows-x64`
-4. Extract each ZIP into a different folder. Run its executable. Windows may show a SmartScreen warning because these executables are not code-signed.
+Extract ZIPs to **separate folders** so their logs cannot be mixed. The official standalone **Intel PresentMon 2.6.0 console** is included in each ZIP, downloaded in Actions with a pinned SHA-256. Windows may warn that our unsigned DX12 binaries are unrecognized.
 
-Windows 11 x64 and a DirectX 12 GPU are required. The Reflex edition also requires an NVIDIA GPU and an installed NVIDIA driver with Reflex support. There are no separate compilers, SDKs, or NVAPI DLL downloads needed on your PC; NVAPI functionality is provided by the installed driver.
+## Recommended: one-click full tracing
 
-## Run an unattended experiment
+**Double-click `Run-Diagnostics.cmd`**, approve the Windows administrator prompt, and leave the screen awake and the renderer foregrounded. The default supervised run is **30 minutes, 60 FPS, V-Sync Off, borderless**, with a 30 ms hitch threshold. Both Baseline and Reflex ZIPs have the same diagnostic launcher.
 
-Use PowerShell or Command Prompt in each extracted folder. For an initial A/B comparison, run identical duration, V-Sync, FPS cap, window mode, and system settings.
+The launcher automatically:
+1. Starts Windows Performance Recorder (WPR) **CPU.light + GPU** in in-memory circular mode (when possible).
+2. Starts our selected DX12 test app; it logs **every frame**, plus a small hitch-only CSV.
+3. Starts the **standalone PresentMon console** attached to our exact application PID, to record actual presentation mode, timing, and frame activity.
+4. On a detected hitch, waits 10 seconds to include post-event data, exports the WPR buffer to an ETL file, then restarts circular tracing after a short cooldown.
+5. Monitors an **approximately 2 GiB run budget**, stopping external collectors when near the budget. The renderer also caps its own frame CSV to 384 MiB. Saving an ETL can temporarily exceed the budget, in which case the latest oversized ETL is discarded.
 
-**Baseline, four hours:**
+**Important limitations:** Circular ETW buffer retention depends on event rate, so the script cannot guarantee exactly 10 seconds *before* every hitch. WPR and PresentMon are separate ETW consumers; if Windows refuses one session or they conflict, the console and `trace-notes.txt` report it. ETW trace exporting can itself cause hitches, which may appear in CSVs; capture/restart intervals are logged and a 15-second cooldown reduces retriggering. This integration is compiled/packaged by CI but needs a runtime test on your PC before we can call it validated.
+
+For custom duration or settings, open **PowerShell as Administrator** in the extracted folder, then run:
 
 ```powershell
-.\GpuHitchLab.exe --vsync off --fps 60 --hitch-ms 30 --borderless --hours 4
+.\Launch-Diagnostics.ps1 -Hours 0 -Minutes 15 -Seconds 30 -Fps 60 -Vsync off -HitchMs 30 -Reflex on
 ```
 
-**Reflex On, four hours:**
+Parameters: `-Hours`, `-Minutes`, `-Seconds` (add together), `-Fps`, `-Vsync off|on`, `-Reflex off|on|boost` (only used for Reflex binary), `-HitchMs`, `-BudgetMB` (128–2048), `-PostHitchSeconds`, `-SkipEtw`, `-SkipPresentMon`, and `-Windowed`. To investigate PowerShell issues, review `logs/diagnostics-*/trace-notes.txt`.
+
+## Direct app run (no admin, basic logging)
+
+You can run either executable directly, without external tracing. Examples:
 
 ```powershell
+.\GpuHitchLab.exe --vsync off --fps 60 --hitch-ms 30 --borderless --minutes 15 --seconds 30
 .\GpuHitchLabReflex.exe --reflex on --vsync off --fps 60 --hitch-ms 30 --borderless --hours 4
 ```
 
-You can also launch the Reflex executable with `--reflex off` or `--reflex boost` (On + Boost). On + Boost requests higher GPU clocks and may increase power use. The Reflex build defaults to **On**, and **R** cycles Off → On → On + Boost. The baseline build never calls NVIDIA's Reflex APIs.
+Use only the executable present in your extracted ZIP. `--hours`, `--minutes`, and `--seconds` are additive; all zero means run until closed. `--max-log-mb N` sets the frame CSV limit (16–2048; default 384). Other options: `--width`, `--height`, `--help`. Hotkeys: **V** toggles V-Sync; **F11** toggles borderless; **R** cycles Reflex Off / On / On+Boost (Reflex edition only); **Esc** quits.
 
-Options:
+## Output files
 
-| Option | Meaning |
-| --- | --- |
-| `--vsync on` or `--vsync off` | DXGI Present sync interval 1 or 0 (default: off) |
-| `--fps N` | FPS cap; `0` is uncapped (default: 60) |
-| `--hitch-ms N` | Interval threshold in milliseconds (default: 30) |
-| `--borderless` | Cover the active monitor with a borderless window (useful for testing flip presentation) |
-| `--hours N` | Automatically stop after N hours (default: run until closed) |
-| `--width N --height N` | Initial windowed size (default: 1280 x 720) |
-| `--reflex off`, `--reflex on`, or `--reflex boost` | Reflex edition only (default: on) |
-| `--help` | Show command-line help |
+Alongside the executable in `logs/`:
 
-Keys: **V** toggles V-Sync, **F11** toggles borderless mode, **R** cycles Reflex mode in the Reflex edition, and **Esc** exits. The window title displays frame count, detected hitch count, recent timings, V-Sync, limiter, and Reflex state when applicable. When inactive or minimized, the renderer pauses and ignores focus/resize transitions to avoid treating Alt-Tab as a graphics hitch.
+- `frames-<time>.csv`: **each completed frame**, kept in buffered CSV for low overhead.
+- `hitches-<time>.csv`: only detected hitches (flushed immediately).
+- `session-<time>.txt`: adapter, test configuration, Reflex driver state when available, window/focus/display/power events.
 
-## Logged data
+When supervised tracing runs, `logs/diagnostics-<time>/` also contains:
 
-Logs are written beside the executable under `logs/`, with one `hitches-*.csv` file and one `session-*.txt` file per run. The CSV contains **only detected hitches**, not every frame, so unattended runs use little disk space. A row is written once the corresponding GPU timestamp result is available, usually a few frames later. Closing normally flushes pending events.
+- `presentmon-all-frames.csv`: independent PresentMon per-frame data with GPU Busy/Wait and actual presentation details **when supported by OS/driver**.
+- `hitch-001.etl`, etc.: CPU scheduling and GPU events stored by WPR from circular buffers.
+- `trace-notes.txt`: UTC times, trace lifecycle, errors, disk budget, and important caveats.
 
-CSV columns include:
+The renderer's per-frame CSV includes wall-clock frame-start interval, **previous** Present duration, current Present duration, fence wait, command record time, queue submission time, previous limiter pacing and overshoot, GPU command timestamp duration, Reflex sleep time, and thread CPU **cycles**. Thread cycles are **not** a reliable conversion to CPU Busy milliseconds. Actual blocked-versus-running CPU analysis requires the WPR ETL. Likewise, `gpu_command_ms` is duration between the DX12 GPU timestamps, **not full GPU Busy**.
 
-- `frame_interval_ms`: wall time between the starts of consecutive frames, including any previous Present block, CPU wait and FPS limiter.
-- `previous_present_ms`: time spent inside the **previous** frame's `IDXGISwapChain::Present` call; particularly useful for inspecting the source of a frame-interval hitch.
-- `present_ms`: CPU time inside the **current** frame's `Present` call; analogous to, but not identical to, CapFrameX's `MsInPresentAPI`.
-- `fence_wait_ms`: CPU wait for a reusable back buffer's command allocator.
-- `record_submit_ms` / `cpu_work_ms`: CPU work on the current frame, excluding/including Present respectively.
-- `gpu_command_ms`: GPU timestamp difference surrounding this app's render commands (a clear and barriers), **not** total GPU Busy or display latency.
-- `reason`: whether the interval, Present time, or fence wait exceeded the detection threshold.
-- Reflex edition only: `reflex_mode` and `reflex_sleep_ms`, showing which SDK mode was requested and time spent in the real `NvAPI_D3D_Sleep` call. That time can be intentional pacing rather than a GPU stall.
+Frames flagged by interval > `--hitch-ms`, Present duration > max(22.5ms, 0.75 × threshold), or fence wait > max(12ms, 0.5 × threshold). Focus and resize warmup are ignored. A row may be flushed several frames after its GPU work is completed.
 
-Detection is intentionally simple: the interval exceeds `--hitch-ms`, or a Present call exceeds `max(22.5 ms, 75% of --hitch-ms)`, or a fence wait exceeds `max(12 ms, 50% of --hitch-ms)`. Measurements immediately after focus changes and resizes are excluded. Initial warmup is excluded.
+## What remains unknown
 
-## Reflex implementation notes
+Our Cyberpunk capture showed an approximately **38.42 ms frame** following a **26.55 ms Present API call** while GPU Busy was about **13 ms**. That supports investigating CPU-side presentation blocking but **does not prove a Windows, driver, VRR, or hardware defect**. A long Present call can indicate normal queue backpressure.
 
-The Reflex executable compiles against the [official NVIDIA NVAPI SDK](https://github.com/NVIDIA/nvapi) (MIT-licensed) on GitHub Actions, pinned to a specific SDK commit. It initializes NVAPI and requires successful driver calls for `NvAPI_D3D_SetSleepMode`, `NvAPI_D3D_Sleep`, and `NvAPI_D3D_SetLatencyMarker`. Each rendered frame has simulation, render-submit, and Present markers. The session text file records the driver's reported low-latency state when that query is available; an API failure produces a visible error rather than a fake Reflex success.
+The renderer uses a DXGI flip-discard swap chain; **Independent Flip is not guaranteed**. Use the bundled PresentMon stream to verify the actual mode during your run. GPU workload remains deliberately tiny because this is primarily a presentation experiment. Keep FreeSync/G-Sync settings unchanged, keep the display on, and avoid minimizing or Alt-Tabbing during the test.
 
-For comparison, both binaries use the same existing CPU-based `--fps` limiter; NVAPI's `minimumIntervalUs` is zero. NVIDIA recommends calling its sleep function once per rendered frame, even when Reflex is Off, so **Reflex Off is not identical to the non-NVAPI baseline**. This distinction matters when interpreting differences.
+### Trace privacy and analysis
 
-## Important limitations / next steps
+ETL files may reveal process names, timing, loaded modules, and other local system data. Review before uploading. You do **not** need the Windows Performance Analyzer locally just to collect traces; the ETLs can be analyzed separately afterward. If a capture fails, share `trace-notes.txt`, `session-*.txt`, and `hitches-*.csv` first.
 
-- **Independent Flip is not verified.** The app uses a flip-discard swap chain and enables the DXGI tearing flag in V-Sync Off when supported, but Windows decides the actual presentation mode. Borderless fullscreen can help test conditions similar to your games.
-- This first renderer performs a tiny GPU workload. It can reveal system-level presentation stalls without game complexity, but cannot yet simulate Cyberpunk's ~13 ms GPU work.
-- A 38.42 ms hitch with ~26.55 ms spent in Present and ~13 ms GPU Busy is **consistent with** a presentation-related wait; it does not prove a root cause.
-- Planned follow-ups after validating both executables: optional calibrated GPU workload, PresentMon/ETW correlation for actual presentation mode, richer context around hitches, and on-device NVIDIA Reflex verification.
-
-Source is built with GitHub-hosted Windows runners and MSVC, including the NVIDIA SDK checkout. No local build toolchain is required.
+PresentMon: https://github.com/GameTechDev/PresentMon (official standalone console). WPR: native Microsoft Windows Performance Recorder.
