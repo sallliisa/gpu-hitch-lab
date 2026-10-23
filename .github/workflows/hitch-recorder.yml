@@ -1,0 +1,57 @@
+name: Build Hitch Recorder (Windows x64)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tools/hitch-recorder/**"
+      - ".github/workflows/hitch-recorder.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure MSVC x64
+        run: cmake -S tools/hitch-recorder -B build-hitch -G "Visual Studio 17 2022" -A x64
+
+      - name: Compile release
+        run: cmake --build build-hitch --config Release --parallel
+
+      - name: Self-test profile generation
+        shell: pwsh
+        run: |
+          Copy-Item tools/hitch-recorder/HitchCPU.wprp build-hitch/Release/HitchCPU.wprp
+          & build-hitch/Release/HitchRecorder.exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw "HitchRecorder self-test failed" }
+
+      - name: Validate ETW profile on Windows
+        shell: pwsh
+        run: |
+          $wpr = Join-Path $env:windir "System32/wpr.exe"
+          if (-not (Test-Path $wpr)) { throw "wpr.exe is not present on the Windows runner" }
+          & $wpr -profiles tools/hitch-recorder/HitchCPU.wprp
+          if ($LASTEXITCODE -ne 0) { throw "WPR rejected the HitchCPU profile" }
+
+      - name: Package CLI
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package-hitch | Out-Null
+          Copy-Item build-hitch/Release/HitchRecorder.exe package-hitch/HitchRecorder.exe
+          Copy-Item tools/hitch-recorder/HitchCPU.wprp package-hitch/HitchCPU.wprp
+          Copy-Item tools/hitch-recorder/Run-HitchRecorder.cmd package-hitch/Run-HitchRecorder.cmd
+          Copy-Item tools/hitch-recorder/README.md package-hitch/README.md
+
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HitchRecorder-Windows-x64
+          path: package-hitch/
+          retention-days: 14
+          if-no-files-found: error
