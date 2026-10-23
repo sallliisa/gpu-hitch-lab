@@ -11,7 +11,7 @@
       <Keywords>
         <Keyword Value="ProcessThread"/>
         <Keyword Value="Loader"/>
-        <Keyword Value="CPUConfig"/>
+        <Keyword Value="CpuConfig"/>
         <Keyword Value="CSwitch"/>
         <Keyword Value="ReadyThread"/>
         <Keyword Value="ThreadPriority"/>
