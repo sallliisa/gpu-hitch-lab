@@ -116,6 +116,7 @@ struct Options {
     double minutes = 0.0;
     double seconds = 0.0;
     double durationSeconds = 0.0;
+    int maxLogMb = 384;
 #ifdef GPU_HITCH_LAB_REFLEX
     ReflexMode reflex = ReflexMode::On;
 #endif
@@ -163,6 +164,10 @@ Options ParseOptions() {
                 result.seconds = std::stod(value);
                 if (!std::isfinite(result.seconds) || result.seconds < 0.0 || result.seconds > 604800.0)
                     throw std::runtime_error("--seconds must be between 0 and 604800");
+            } else if (arg == L"--max-log-mb") {
+                result.maxLogMb = std::stoi(value);
+                if (result.maxLogMb < 16 || result.maxLogMb > 2048)
+                    throw std::runtime_error("--max-log-mb must be between 16 and 2048");
             } else if (arg == L"--width") {
                 result.width = std::stoi(value);
                 if (result.width < 320 || result.width > 16384)
@@ -265,6 +270,7 @@ public:
                  << "Frame interval hitch threshold (ms): " << options.hitchMs << "\n"
                  << "Requested duration in seconds (zero=indefinite): " << options.durationSeconds << "\n"
                  << "Every completed frame logged to frames CSV; only hits to hitches CSV.\n"
+                 << "Frame CSV size limit (MB): " << options.maxLogMb << "\n"
                  << "cpu_thread_cycles is a cycle count, not CPU time in milliseconds.\n"
                  << "Note: GPU timestamp covers only the app's rendering commands, not "
                     "display time or all GPU work.\n";
@@ -274,15 +280,14 @@ public:
                  << "NvAPI minimumIntervalUs: 0 (the same CPU FPS limiter as baseline)\n"
                  << "NvAPI sleep called once per rendered frame, including Reflex Off.\n";
 #endif
+        maxFrameLogBytes_ = static_cast<uint64_t>(options.maxLogMb) * 1024ULL * 1024ULL;
         session_.flush();
     }
 
-#ifdef GPU_HITCH_LAB_REFLEX
     void Note(const std::string& message) {
         session_ << UtcStamp(false) << " " << message << '\n';
         session_.flush();
     }
-#endif
 
     void Frame(const FrameSample& sample, double gpuMs) {
         if (framesFull_) return;
@@ -291,9 +296,9 @@ public:
             frames_.flush();
             // A conservative safety ceiling to prevent multi-day tests filling a disk.
             const auto current = frames_.tellp();
-            if (current >= 0 && static_cast<uint64_t>(current) >= 2ULL * 1024 * 1024 * 1024) {
+            if (current >= 0 && static_cast<uint64_t>(current) >= maxFrameLogBytes_) {
                 framesFull_ = true;
-                session_ << UtcStamp(false) << " Frame CSV reached 2 GiB; continuing hitch-only logging.\n";
+                session_ << UtcStamp(false) << " Frame CSV size limit reached; continuing hitch-only logging.\n";
                 session_.flush();
             }
         }
@@ -327,6 +332,7 @@ private:
     std::ofstream frames_;
     std::ofstream session_;
     uint64_t framesWritten_ = 0;
+    uint64_t maxFrameLogBytes_ = 384ULL * 1024ULL * 1024ULL;
     bool framesFull_ = false;
 };
 
@@ -426,14 +432,17 @@ private:
         if (app) {
             switch (message) {
                 case WM_ACTIVATEAPP:
+                    app->logger_.Note(wparam ? "Window activated" : "Window deactivated");
                     app->active_ = wparam != 0;
                     app->previousFrameStartMs_ = -1.0;
                     app->ignoreUntilMs_ = NowMs() + 2000.0;
                     return 0;
                 case WM_ENTERSIZEMOVE:
+                    app->logger_.Note("Entered interactive window move/resize");
                     app->sizing_ = true;
                     return 0;
                 case WM_EXITSIZEMOVE:
+                    app->logger_.Note("Finished interactive window move/resize");
                     app->sizing_ = false;
                     app->ignoreUntilMs_ = NowMs() + 1000.0;
                     return 0;
@@ -470,6 +479,13 @@ private:
                         return 0;
                     }
                     break;
+                case WM_DISPLAYCHANGE:
+                    app->logger_.Note("Windows display configuration changed");
+                    app->ignoreUntilMs_ = NowMs() + 2000.0;
+                    return 0;
+                case WM_POWERBROADCAST:
+                    app->logger_.Note("Windows power broadcast event code=" + std::to_string(wparam));
+                    return TRUE;
                 case WM_DESTROY:
                     PostQuitMessage(0);
                     return 0;
@@ -970,6 +986,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 L"--hitch-ms N     (default: 30)\n"
                 L"--borderless     (monitor-sized borderless window)\n"
                 L"--hours N --minutes N --seconds N  (additive duration)\n"
+                L"--max-log-mb N  (frame CSV cap; default 384)\n"
                 L"--width N --height N\n\n"
 #ifdef GPU_HITCH_LAB_REFLEX
                 L"--reflex off|on|boost  (default: on)\n\n"
