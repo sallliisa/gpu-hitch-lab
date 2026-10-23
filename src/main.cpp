@@ -113,6 +113,9 @@ struct Options {
     int height = 720;
     double hitchMs = 30.0;
     double hours = 0.0;
+    double minutes = 0.0;
+    double seconds = 0.0;
+    double durationSeconds = 0.0;
 #ifdef GPU_HITCH_LAB_REFLEX
     ReflexMode reflex = ReflexMode::On;
 #endif
@@ -150,8 +153,16 @@ Options ParseOptions() {
                     throw std::runtime_error("--hitch-ms must be between 5 and 1000");
             } else if (arg == L"--hours") {
                 result.hours = std::stod(value);
-                if (!(result.hours > 0.0 && result.hours <= 168.0))
+                if (!std::isfinite(result.hours) || result.hours < 0.0 || result.hours > 168.0)
                     throw std::runtime_error("--hours must be between 0 and 168");
+            } else if (arg == L"--minutes") {
+                result.minutes = std::stod(value);
+                if (!std::isfinite(result.minutes) || result.minutes < 0.0 || result.minutes > 10080.0)
+                    throw std::runtime_error("--minutes must be between 0 and 10080");
+            } else if (arg == L"--seconds") {
+                result.seconds = std::stod(value);
+                if (!std::isfinite(result.seconds) || result.seconds < 0.0 || result.seconds > 604800.0)
+                    throw std::runtime_error("--seconds must be between 0 and 604800");
             } else if (arg == L"--width") {
                 result.width = std::stoi(value);
                 if (result.width < 320 || result.width > 16384)
@@ -177,6 +188,9 @@ Options ParseOptions() {
         throw;
     }
     LocalFree(argv);
+    result.durationSeconds = 3600.0 * result.hours + 60.0 * result.minutes + result.seconds;
+    if (result.durationSeconds > 604800.0)
+        throw std::runtime_error("Combined duration cannot exceed seven days");
     return result;
 }
 
@@ -327,8 +341,8 @@ public:
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
-            if (options_.hours > 0.0 &&
-                NowMs() - startedMs_ >= options_.hours * 3600000.0) {
+            if (options_.durationSeconds > 0.0 &&
+                NowMs() - startedMs_ >= options_.durationSeconds * 1000.0) {
                 return 0;
             }
             if (!active_ || sizing_ || IsIconic(hwnd_)) {
@@ -889,7 +903,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 L"--fps N          (0 = uncapped; default: 60)\n"
                 L"--hitch-ms N     (default: 30)\n"
                 L"--borderless     (monitor-sized borderless window)\n"
-                L"--hours N        (exit after N hours)\n"
+                L"--hours N --minutes N --seconds N  (additive duration)\n"
                 L"--width N --height N\n\n"
 #ifdef GPU_HITCH_LAB_REFLEX
                 L"--reflex off|on|boost  (default: on)\n\n"
